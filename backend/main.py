@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.config import SERVER_HOST, SERVER_PORT
+from backend.config import SERVER_HOST, SERVER_PORT, SSL_CERTFILE, SSL_KEYFILE
 from backend.database import init_db
 from backend.routers.task import router as task_router
 from backend.routers.settings import router as settings_router
@@ -62,9 +62,14 @@ async def startup_event():
 
 # ============ 主程序入口 ============
 if __name__ == "__main__":
+    ssl_kwargs = {}
+    if SSL_CERTFILE and SSL_KEYFILE:
+        ssl_kwargs["ssl_certfile"] = SSL_CERTFILE
+        ssl_kwargs["ssl_keyfile"] = SSL_KEYFILE
     uvicorn.run(
         "backend.main:app",
         host=SERVER_HOST,
         port=SERVER_PORT,
         reload=True,
+        **ssl_kwargs,
     )

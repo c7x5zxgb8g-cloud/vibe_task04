@@ -17,6 +17,10 @@ TASKS_DIR.mkdir(parents=True, exist_ok=True)
 SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "8090"))
 
+# SSL 配置（解决非 localhost 环境下浏览器禁用麦克风的问题）
+SSL_CERTFILE = os.getenv("SSL_CERTFILE", "")
+SSL_KEYFILE = os.getenv("SSL_KEYFILE", "")
+
 # ============ FunASR 配置 ============
 FUNASR_HOST = os.getenv("FUNASR_HOST", "localhost")
 FUNASR_PORT = int(os.getenv("FUNASR_PORT", "10095"))
