@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 语音任务助手</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <!-- 顶部导航 -->
+    <header class="header">
+        <h1 class="header-title">AI 语音任务助手</h1>
+        <button class="settings-btn" id="settingsBtn" title="设置">⚙️</button>
+    </header>
+
+    <!-- Toast 提示容器 -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- 主区域 -->
+    <main class="main-content">
+        <!-- 录音控制区 -->
+        <section class="recording-section">
+            <!-- ASR 模式选择 -->
+            <div class="asr-mode-selector" id="asrModeSelector">
+                <label class="asr-mode-option">
+                    <input type="radio" name="asrMode" value="realtime" checked>
+                    <span class="asr-mode-label">🎙️ 实时转写</span>
+                </label>
+                <label class="asr-mode-option">
+                    <input type="radio" name="asrMode" value="file">
+                    <span class="asr-mode-label">📁 文件转写</span>
+                </label>
+            </div>
+
+            <div class="record-btn-wrapper">
+                <div class="pulse-ring" id="pulseRing"></div>
+                <button class="record-btn" id="recordBtn" title="点击开始录音">
+                    <span class="record-icon" id="recordIcon">🎤</span>
+                </button>
+            </div>
+            <div class="record-status" id="recordStatus">点击按钮开始录音</div>
+            <div class="record-timer" id="recordTimer" style="display: none;">00:00</div>
+            <!-- 录音波形动画 -->
+            <div class="waveform" id="waveform" style="display: none;">
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+                <span class="wave-bar"></span>
+            </div>
+
+            <!-- 实时转写文本显示区 -->
+            <div class="realtime-transcript" id="realtimeTranscript" style="display: none;">
+                <div class="realtime-transcript-header">
+                    <span class="realtime-transcript-title">实时转写结果</span>
+                    <span class="realtime-transcript-indicator" id="realtimeIndicator"></span>
+                </div>
+                <div class="realtime-transcript-content" id="realtimeTranscriptContent">
+                    <span class="realtime-placeholder">等待语音输入...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 当前任务状态展示区 -->
+        <section class="current-task-section" id="currentTaskSection" style="display: none;">
+            <h2 class="section-title">当前任务</h2>
+            <div class="current-task-card" id="currentTaskCard">
+                <div class="task-progress">
+                    <div class="task-progress-bar" id="taskProgressBar"></div>
+                </div>
+                <div class="task-info">
+                    <span class="task-status-label" id="currentTaskStatus">--</span>
+                    <span class="task-id" id="currentTaskId">--</span>
+                </div>
+                <div class="task-actions" id="currentTaskActions"></div>
+            </div>
+        </section>
+
+        <!-- 历史任务列表 -->
+        <section class="history-section">
+            <h2 class="section-title">近 7 天历史任务</h2>
+            <div class="task-list" id="taskList">
+                <div class="task-list-empty" id="taskListEmpty">
+                    <span class="empty-icon">📭</span>
+                    <p>暂无历史任务</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- 设置弹窗 -->
+    <div class="modal-overlay" id="settingsModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 class="modal-title">设置</h2>
+                <button class="modal-close" id="modalCloseBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <label class="form-label" for="summaryPrompt">总结提示词</label>
+                <textarea class="form-textarea" id="summaryPrompt" rows="6" placeholder="请输入总结提示词..."></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="modalCancelBtn">取消</button>
+                <button class="btn btn-primary" id="modalSaveBtn">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
