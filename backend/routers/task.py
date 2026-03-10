@@ -96,8 +96,6 @@ async def process_task(task_id: str, skip_transcribe: bool = False):
             logger.error("任务 %s 不存在，无法处理", task_id)
             return
 
-        audio_path = str(TASKS_DIR / task_id / task.audio_filename)
-
         # ---- 步骤 1: 语音转写 ----
         if not skip_transcribe:
             try:
@@ -107,15 +105,37 @@ async def process_task(task_id: str, skip_transcribe: bool = False):
                 db.commit()
 
                 if task.asr_mode == "file":
-                    # DashScope 文件转写
+                    # DashScope 文件转写（支持多分段）
                     from backend.services.asr_dashscope import transcribe_file
 
-                    audio_serve_url = f"{SERVER_PUBLIC_URL}/api/task/{task_id}/audio"
-                    transcript_text = await transcribe_file(audio_path, audio_serve_url)
+                    audio_filenames = [
+                        f.strip()
+                        for f in task.audio_filename.split(",")
+                        if f.strip()
+                    ]
+                    all_transcripts = []
+
+                    for seg_idx, audio_fname in enumerate(audio_filenames):
+                        seg_audio_path = str(TASKS_DIR / task_id / audio_fname)
+                        audio_serve_url = (
+                            f"{SERVER_PUBLIC_URL}/api/task/{task_id}/audio/{audio_fname}"
+                        )
+                        segment_text = await transcribe_file(
+                            seg_audio_path, audio_serve_url
+                        )
+                        all_transcripts.append(segment_text)
+                        logger.info(
+                            "任务 %s: 分段 %d/%d 转写完成",
+                            task_id, seg_idx + 1, len(audio_filenames),
+                        )
+
+                    transcript_text = "\n".join(all_transcripts)
                 else:
-                    # 默认使用 FunASR
+                    # 默认使用 FunASR（取第一个音频文件）
                     from backend.services.asr import transcribe
 
+                    first_audio = task.audio_filename.split(",")[0].strip()
+                    audio_path = str(TASKS_DIR / task_id / first_audio)
                     transcript_text = await transcribe(audio_path)
 
                 transcript_filename = f"{task_id}_transcript.txt"
@@ -225,7 +245,7 @@ async def process_task(task_id: str, skip_transcribe: bool = False):
 @router.post("/upload", response_model=UploadResponse, status_code=201)
 async def upload_audio(
     background_tasks: BackgroundTasks,
-    file: UploadFile = FileParam(...),
+    files: list[UploadFile] = FileParam(...),
     asr_mode: str = Form("file"),
     transcript_text: str = Form(None),
     db: Session = Depends(get_db),
@@ -233,7 +253,7 @@ async def upload_audio(
     """上传录音并创建任务。
 
     Args:
-        file: 音频文件。
+        files: 音频文件列表（文件模式下可能有多个分段，每 30 分钟自动切片）。
         asr_mode: ASR 模式 - "realtime"（实时转写）或 "file"（文件转写）。
         transcript_text: 实时模式下前端已获得的转写文本（可选）。
     """
@@ -241,23 +261,18 @@ async def upload_audio(
     if asr_mode not in ("realtime", "file"):
         raise HTTPException(status_code=400, detail=f"不支持的 asr_mode: {asr_mode}")
 
-    # 校验文件类型（忽略 codecs 等参数，如 "audio/webm;codecs=opus" -> "audio/webm"）
-    raw_content_type = file.content_type or ""
-    base_content_type = raw_content_type.split(";")[0].strip().lower()
-    if base_content_type not in ALLOWED_AUDIO_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"不支持的音频格式: {file.content_type}。支持: {', '.join(ALLOWED_AUDIO_TYPES)}",
-        )
+    if not files:
+        raise HTTPException(status_code=400, detail="未上传音频文件")
 
-    # 读取文件内容并校验大小
-    content = await file.read()
-    file_size_mb = len(content) / (1024 * 1024)
-    if file_size_mb > MAX_AUDIO_SIZE_MB:
-        raise HTTPException(
-            status_code=400,
-            detail=f"文件大小 {file_size_mb:.1f}MB 超过限制 {MAX_AUDIO_SIZE_MB}MB",
-        )
+    # 校验所有文件的类型（忽略 codecs 等参数，如 "audio/webm;codecs=opus" -> "audio/webm"）
+    for f in files:
+        raw_content_type = f.content_type or ""
+        base_content_type = raw_content_type.split(";")[0].strip().lower()
+        if base_content_type not in ALLOWED_AUDIO_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的音频格式: {f.content_type}。支持: {', '.join(ALLOWED_AUDIO_TYPES)}",
+            )
 
     # 生成任务 ID
     timestamp = int(time.time())
@@ -268,30 +283,63 @@ async def upload_audio(
     task_dir = TASKS_DIR / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
 
-    # 保存音频文件
-    audio_filename = file.filename or f"{task_id}_audio"
-    audio_path = task_dir / audio_filename
-    try:
-        async with aiofiles.open(str(audio_path), "wb") as f:
-            await f.write(content)
-        logger.info("任务 %s: 音频文件已保存到 %s", task_id, audio_path)
-    except Exception as e:
-        logger.error("任务 %s: 保存音频文件失败 - %s", task_id, str(e))
-        raise HTTPException(status_code=500, detail="保存音频文件失败")
+    # 读取并保存所有音频文件
+    audio_filenames = []
+    total_size = 0
+
+    for idx, upload_file in enumerate(files):
+        content = await upload_file.read()
+        total_size += len(content)
+
+        # 确定文件名
+        orig_name = upload_file.filename or "recording.webm"
+        dot_idx = orig_name.rfind(".")
+        suffix = orig_name[dot_idx:] if dot_idx >= 0 else ".webm"
+
+        if len(files) > 1:
+            segment_name = f"{task_id}_audio_{idx + 1:03d}{suffix}"
+        else:
+            segment_name = orig_name
+
+        audio_path = task_dir / segment_name
+        try:
+            async with aiofiles.open(str(audio_path), "wb") as f:
+                await f.write(content)
+            audio_filenames.append(segment_name)
+            logger.info(
+                "任务 %s: 音频文件 %d/%d 已保存 (%s)",
+                task_id, idx + 1, len(files), segment_name,
+            )
+        except Exception as e:
+            logger.error("任务 %s: 保存音频文件失败 - %s", task_id, str(e))
+            raise HTTPException(status_code=500, detail="保存音频文件失败")
+
+    # 校验总文件大小
+    total_size_mb = total_size / (1024 * 1024)
+    if total_size_mb > MAX_AUDIO_SIZE_MB:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件总大小 {total_size_mb:.1f}MB 超过限制 {MAX_AUDIO_SIZE_MB}MB",
+        )
+
+    audio_filename_str = ",".join(audio_filenames)
 
     # 在数据库创建 Task 记录
     try:
         task = Task(
             id=task_id,
             status=TaskStatus.UPLOADED,
-            audio_filename=audio_filename,
+            audio_filename=audio_filename_str,
             task_dir=str(task_dir),
             asr_mode=asr_mode,
         )
         db.add(task)
         db.commit()
         db.refresh(task)
-        logger.info("任务 %s: 数据库记录已创建 (asr_mode=%s)", task_id, asr_mode)
+        logger.info(
+            "任务 %s: 数据库记录已创建 (asr_mode=%s, 分段数=%d)",
+            task_id, asr_mode, len(audio_filenames),
+        )
     except Exception as e:
         logger.error("任务 %s: 创建数据库记录失败 - %s", task_id, str(e))
         raise HTTPException(status_code=500, detail="创建任务记录失败")
@@ -366,9 +414,10 @@ async def download_zip(task_id: str, db: Session = Depends(get_db)):
 
 @router.get("/{task_id}/audio")
 async def serve_audio(task_id: str, db: Session = Depends(get_db)):
-    """为 DashScope 文件转写提供音频文件访问。
+    """为 DashScope 文件转写提供音频文件访问（默认返回第一个分段）。
 
     此端点供 DashScope 服务器回调拉取音频文件使用。
+    对于多分段录音，请使用 /{task_id}/audio/{filename} 端点。
     """
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
@@ -377,7 +426,9 @@ async def serve_audio(task_id: str, db: Session = Depends(get_db)):
     if not task.audio_filename:
         raise HTTPException(status_code=404, detail="音频文件不存在")
 
-    audio_path = TASKS_DIR / task_id / task.audio_filename
+    # 取第一个音频文件（兼容多分段场景）
+    first_audio = task.audio_filename.split(",")[0].strip()
+    audio_path = TASKS_DIR / task_id / first_audio
     if not audio_path.exists():
         raise HTTPException(status_code=404, detail="音频文件未找到")
 
@@ -395,7 +446,45 @@ async def serve_audio(task_id: str, db: Session = Depends(get_db)):
 
     return FileResponse(
         path=str(audio_path),
-        filename=task.audio_filename,
+        filename=first_audio,
+        media_type=media_type,
+    )
+
+
+@router.get("/{task_id}/audio/{filename}")
+async def serve_audio_by_name(task_id: str, filename: str, db: Session = Depends(get_db)):
+    """为 DashScope 文件转写提供指定分段的音频文件访问。
+
+    此端点用于多分段录音场景，供 DashScope 服务器逐段拉取音频文件。
+    """
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 验证请求的文件名确实属于此任务
+    audio_filenames = [f.strip() for f in task.audio_filename.split(",") if f.strip()]
+    if filename not in audio_filenames:
+        raise HTTPException(status_code=404, detail="音频文件不存在")
+
+    audio_path = TASKS_DIR / task_id / filename
+    if not audio_path.exists():
+        raise HTTPException(status_code=404, detail="音频文件未找到")
+
+    # 根据扩展名推断 MIME 类型
+    suffix = audio_path.suffix.lower()
+    media_types = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".webm": "audio/webm",
+        ".ogg": "audio/ogg",
+        ".m4a": "audio/mp4",
+        ".mp4": "audio/mp4",
+    }
+    media_type = media_types.get(suffix, "application/octet-stream")
+
+    return FileResponse(
+        path=str(audio_path),
+        filename=filename,
         media_type=media_type,
     )
 

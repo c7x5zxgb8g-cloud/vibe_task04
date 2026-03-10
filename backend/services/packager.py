@@ -24,7 +24,7 @@ def package_task(
 
     Args:
         task_dir: 任务目录的路径。
-        audio_file: 音频文件名（相对于 task_dir）。
+        audio_file: 音频文件名（相对于 task_dir），多个分段用逗号分隔。
         transcript_file: 转写文本文件名（相对于 task_dir）。
         summary_file: 总结文件名（相对于 task_dir）。
         zip_filename: 输出的 ZIP 文件名（相对于 task_dir）。
@@ -41,9 +41,11 @@ def package_task(
         logger.error("任务目录不存在: %s", task_dir)
         raise FileNotFoundError(f"任务目录不存在: {task_dir}")
 
-    # 构建文件完整路径
+    # 构建文件完整路径（audio_file 可能包含多个逗号分隔的文件名，对应分段录音）
     files_to_pack: list[tuple[Path, str]] = []
-    for filename in (audio_file, transcript_file, summary_file):
+    audio_files = [f.strip() for f in audio_file.split(",") if f.strip()]
+    all_filenames = audio_files + [transcript_file, summary_file]
+    for filename in all_filenames:
         file_path = task_path / filename
         if not file_path.exists():
             logger.error("文件不存在，无法打包: %s", file_path)

@@ -94,6 +94,13 @@
     let audioContext = null;
     let scriptProcessor = null;
 
+    // 文件模式分段录制（每 30 分钟自动切片，避免单次录音过长）
+    const SEGMENT_DURATION_MS = 30 * 60 * 1000;
+    let audioSegments = [];
+    let segmentTimer = null;
+    let isAutoSegmenting = false;
+    let recordingMimeType = 'audio/webm';
+
     // ==================== 工具函数 ====================
 
     function showToast(message, type = 'info') {
@@ -302,6 +309,75 @@
         }
     }
 
+    // ==================== 文件模式分段录制 ====================
+
+    function startSegmentTimer() {
+        clearSegmentTimer();
+        if (asrMode === 'file') {
+            segmentTimer = setTimeout(() => {
+                if (isRecording && mediaRecorder && mediaRecorder.state === 'recording') {
+                    console.log('Auto-segmenting: 30 min reached, creating segment', audioSegments.length + 1);
+                    isAutoSegmenting = true;
+                    mediaRecorder.stop();
+                }
+            }, SEGMENT_DURATION_MS);
+        }
+    }
+
+    function clearSegmentTimer() {
+        if (segmentTimer) {
+            clearTimeout(segmentTimer);
+            segmentTimer = null;
+        }
+    }
+
+    function createMediaRecorder(stream) {
+        const mr = new MediaRecorder(stream, { mimeType: recordingMimeType });
+
+        mr.ondataavailable = (event) => {
+            if (event.data.size > 0) audioChunks.push(event.data);
+        };
+
+        mr.onstop = () => {
+            // 将当前 chunks 收集为一个分段 Blob
+            if (audioChunks.length > 0) {
+                const segmentBlob = new Blob(audioChunks, { type: recordingMimeType });
+                audioSegments.push(segmentBlob);
+                audioChunks = [];
+            }
+
+            if (isAutoSegmenting) {
+                // 自动分段：重启录制新的一段
+                isAutoSegmenting = false;
+                startNewSegment();
+            } else {
+                // 用户手动停止：进入上传流程
+                handleRecordingComplete();
+            }
+        };
+
+        mr.onerror = (event) => {
+            console.error('MediaRecorder error:', event.error);
+            showToast('录音出错，请重试', 'error');
+            clearSegmentTimer();
+            cleanupRecording();
+            resetRecordingUI();
+        };
+
+        return mr;
+    }
+
+    function startNewSegment() {
+        if (!recordingStream || !isRecording) return;
+
+        mediaRecorder = createMediaRecorder(recordingStream);
+        mediaRecorder.start(100);
+        startSegmentTimer();
+
+        const segNum = audioSegments.length;
+        showToast(`已完成第 ${segNum} 段录音，开始第 ${segNum + 1} 段`, 'info');
+    }
+
     // ==================== 录音管理 ====================
 
     async function startRecording() {
@@ -339,36 +415,25 @@
             }
 
             // ---- MediaRecorder: 录制完整音频文件（两种模式都需要） ----
-            let mimeType = 'audio/webm';
+            recordingMimeType = 'audio/webm';
             if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
-                mimeType = 'audio/webm;codecs=opus';
+                recordingMimeType = 'audio/webm;codecs=opus';
             } else if (MediaRecorder.isTypeSupported('audio/webm')) {
-                mimeType = 'audio/webm';
+                recordingMimeType = 'audio/webm';
             } else if (MediaRecorder.isTypeSupported('audio/wav')) {
-                mimeType = 'audio/wav';
+                recordingMimeType = 'audio/wav';
             } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-                mimeType = 'audio/mp4';
+                recordingMimeType = 'audio/mp4';
             }
 
             audioChunks = [];
-            mediaRecorder = new MediaRecorder(stream, { mimeType });
-
-            mediaRecorder.ondataavailable = (event) => {
-                if (event.data.size > 0) audioChunks.push(event.data);
-            };
-
-            mediaRecorder.onstop = () => {
-                handleRecordingComplete();
-            };
-
-            mediaRecorder.onerror = (event) => {
-                console.error('MediaRecorder error:', event.error);
-                showToast('录音出错，请重试', 'error');
-                cleanupRecording();
-                resetRecordingUI();
-            };
-
+            audioSegments = [];
+            isAutoSegmenting = false;
+            mediaRecorder = createMediaRecorder(stream);
             mediaRecorder.start(100);
+
+            // 文件模式：启动 30 分钟自动分段计时器
+            startSegmentTimer();
 
             // ---- 实时模式：启动 PCM 流式传输 ----
             if (asrMode === 'realtime' && realtimeWs) {
@@ -408,6 +473,8 @@
 
     function stopRecording() {
         isRecording = false;
+        isAutoSegmenting = false;
+        clearSegmentTimer();
 
         // 停止计时器
         if (timerInterval) {
@@ -433,6 +500,7 @@
     }
 
     function cleanupRecording() {
+        clearSegmentTimer();
         stopPcmStreaming();
         closeRealtimeWs();
         if (recordingStream) {
@@ -444,6 +512,9 @@
     function resetRecordingUI() {
         isRecording = false;
         isUploading = false;
+        audioSegments = [];
+        isAutoSegmenting = false;
+        clearSegmentTimer();
 
         if (timerInterval) {
             clearInterval(timerInterval);
@@ -462,7 +533,7 @@
     }
 
     async function handleRecordingComplete() {
-        if (audioChunks.length === 0) {
+        if (audioSegments.length === 0) {
             showToast('录音为空，请重试', 'error');
             cleanupRecording();
             resetRecordingUI();
@@ -501,22 +572,32 @@
         recordBtn.classList.add('uploading');
         recordBtn.disabled = true;
         recordIcon.textContent = '⏳';
-        recordStatus.textContent = '正在上传录音...';
 
-        const mimeType = mediaRecorder.mimeType || 'audio/webm';
-        const extension = mimeType.includes('wav') ? 'wav' : mimeType.includes('mp4') ? 'm4a' : 'webm';
-        const blob = new Blob(audioChunks, { type: mimeType });
-        const file = new File([blob], `recording.${extension}`, { type: mimeType });
+        const segCount = audioSegments.length;
+        recordStatus.textContent = segCount > 1
+            ? `正在上传录音 (${segCount} 个分段)...`
+            : '正在上传录音...';
+
+        const extension = recordingMimeType.includes('wav') ? 'wav'
+            : recordingMimeType.includes('mp4') ? 'm4a' : 'webm';
 
         try {
             const formData = new FormData();
-            formData.append('file', file);
             formData.append('asr_mode', asrMode);
 
             // 实时模式：附带已获得的转写文本
             if (asrMode === 'realtime' && realtimeTranscript) {
                 formData.append('transcript_text', realtimeTranscript);
             }
+
+            // 添加所有录音分段文件
+            audioSegments.forEach((blob, index) => {
+                const name = segCount === 1
+                    ? `recording.${extension}`
+                    : `recording_${String(index + 1).padStart(3, '0')}.${extension}`;
+                const file = new File([blob], name, { type: recordingMimeType });
+                formData.append('files', file);
+            });
 
             const response = await apiRequest(`${API_BASE}/task/upload`, {
                 method: 'POST',
